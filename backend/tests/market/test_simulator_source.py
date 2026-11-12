@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from app.market.cache import PriceCache
+from app.market.seed_prices import SEED_PRICES
 from app.market.simulator import SimulatorDataSource
 
 
@@ -123,6 +124,118 @@ class TestSimulatorDataSource:
         assert cache.version > initial_version + 2
 
         await source.stop()
+
+    async def test_baseline_is_seed(self):
+        """Baseline for daily change % is the seed price, kept across ticks."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.01)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.05)
+        update = cache.get("AAPL")
+        assert update.baseline == SEED_PRICES["AAPL"]
+        expected = round((update.price - SEED_PRICES["AAPL"]) / SEED_PRICES["AAPL"] * 100, 4)
+        assert update.daily_change_percent == expected
+        await source.stop()
+
+    async def test_initial_cache_entry_is_seed(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=10)
+        await source.start(["AAPL"])
+        update = cache.get("AAPL")
+        assert update.price == SEED_PRICES["AAPL"]
+        assert update.direction == "flat"
+        assert update.daily_change_percent == 0.0
+        await source.stop()
+
+    async def test_added_unknown_ticker_baseline_is_its_seed(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.01)
+        await source.start([])
+        await source.add_ticker("ZZZZ")
+        seed = cache.get("ZZZZ").price
+        await asyncio.sleep(0.05)
+        assert cache.get("ZZZZ").baseline == seed
+        await source.stop()
+
+    async def test_validate_any_ticker_prices_it(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache)
+        await source.start([])
+        assert await source.validate_ticker("ZZZZ") is True
+        assert 50 <= cache.get_price("ZZZZ") <= 300
+        assert "ZZZZ" in source.get_tickers()
+        await source.stop()
+
+    async def test_validate_cached_ticker_is_noop(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=10)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.02)  # let the first step run; the next is 10s away
+        v = cache.version
+        assert await source.validate_ticker("AAPL") is True
+        assert cache.version == v
+        await source.stop()
+
+    async def test_add_ticker_before_start(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=10)
+        await source.add_ticker("AAPL")
+        assert cache.get_price("AAPL") == SEED_PRICES["AAPL"]
+        await source.start(["MSFT"])
+        assert set(source.get_tickers()) == {"AAPL", "MSFT"}
+        await source.stop()
+
+    async def test_add_existing_ticker_does_not_reset_price(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.01)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.05)
+        before = cache.get("AAPL")
+        await source.add_ticker("AAPL")
+        assert cache.get("AAPL") == before
+        assert source.get_tickers().count("AAPL") == 1
+        await source.stop()
+
+    async def test_duplicate_start_tickers(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=10)
+        await source.start(["AAPL", "AAPL"])
+        assert source.get_tickers() == ["AAPL"]
+        await source.stop()
+
+    async def test_no_writes_after_stop(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.01)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.03)
+        await source.stop()
+        v = cache.version
+        await asyncio.sleep(0.05)
+        assert cache.version == v
+
+    async def test_step_failure_does_not_kill_loop(self, monkeypatch):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.01)
+        await source.start(["AAPL"])
+        calls = {"n": 0}
+        real_step = source._sim.step
+
+        def flaky_step():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return real_step()
+
+        monkeypatch.setattr(source._sim, "step", flaky_step)
+        v = cache.version
+        await asyncio.sleep(0.1)
+        assert calls["n"] > 1
+        assert cache.version > v
+        assert not source._task.done()
+        await source.stop()
+
+    async def test_is_not_live_market(self):
+        assert SimulatorDataSource(price_cache=PriceCache()).is_live_market is False
 
     async def test_custom_event_probability(self):
         """Test creating source with custom event probability."""

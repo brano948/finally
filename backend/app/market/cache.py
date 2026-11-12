@@ -9,62 +9,80 @@ from .models import PriceUpdate
 
 
 class PriceCache:
-    """Thread-safe in-memory cache of the latest price for each ticker.
+    """Latest PriceUpdate per ticker.
 
-    Writers: SimulatorDataSource or MassiveDataSource (one at a time).
-    Readers: SSE streaming endpoint, portfolio valuation, trade execution.
+    Writers: the active MarketDataSource (simulator loop or Massive poll thread).
+    Readers: SSE, portfolio valuation, trade execution, watchlist.
     """
 
     def __init__(self) -> None:
         self._prices: dict[str, PriceUpdate] = {}
         self._lock = Lock()
-        self._version: int = 0  # Monotonically increasing; bumped on every update
+        self._version = 0
+        self._last_change_at = time.time()
 
-    def update(self, ticker: str, price: float, timestamp: float | None = None) -> PriceUpdate:
-        """Record a new price for a ticker. Returns the created PriceUpdate.
+    def update(
+        self,
+        ticker: str,
+        price: float,
+        timestamp: float | None = None,
+        baseline: float | None = None,
+    ) -> PriceUpdate:
+        """Store a new price and return the resulting PriceUpdate.
 
-        Automatically computes direction and change from the previous price.
-        If this is the first update for the ticker, previous_price == price (direction='flat').
+        previous_price is the prior cached price (or the price itself on the
+        first update). baseline defaults to the prior baseline, then to price.
         """
+        price = round(price, 2)
         with self._lock:
-            ts = timestamp or time.time()
             prev = self._prices.get(ticker)
             previous_price = prev.price if prev else price
-
+            if baseline is None:
+                baseline = prev.baseline if prev else price
             update = PriceUpdate(
                 ticker=ticker,
-                price=round(price, 2),
-                previous_price=round(previous_price, 2),
-                timestamp=ts,
+                price=price,
+                previous_price=previous_price,
+                baseline=round(baseline, 2),
+                timestamp=time.time() if timestamp is None else timestamp,
             )
             self._prices[ticker] = update
             self._version += 1
+            if prev is None or prev.price != price:
+                self._last_change_at = time.time()
             return update
 
     def get(self, ticker: str) -> PriceUpdate | None:
-        """Get the latest price for a single ticker, or None if unknown."""
+        """Latest PriceUpdate for a ticker, or None if not cached."""
         with self._lock:
             return self._prices.get(ticker)
 
-    def get_all(self) -> dict[str, PriceUpdate]:
-        """Snapshot of all current prices. Returns a shallow copy."""
-        with self._lock:
-            return dict(self._prices)
-
     def get_price(self, ticker: str) -> float | None:
-        """Convenience: get just the price float, or None."""
+        """Latest price for a ticker, or None if not cached."""
         update = self.get(ticker)
         return update.price if update else None
 
+    def get_all(self) -> dict[str, PriceUpdate]:
+        """Shallow copy of all prices."""
+        with self._lock:
+            return dict(self._prices)
+
     def remove(self, ticker: str) -> None:
-        """Remove a ticker from the cache (e.g., when removed from watchlist)."""
+        """Drop a ticker. Bumps the version so SSE clients see the removal."""
         with self._lock:
             self._prices.pop(ticker, None)
+            self._version += 1
 
     @property
     def version(self) -> int:
-        """Current version counter. Useful for SSE change detection."""
-        return self._version
+        """Bumps on every write; SSE sends only when it changes."""
+        with self._lock:
+            return self._version
+
+    def seconds_since_change(self) -> float:
+        """Seconds since any cached price last changed value."""
+        with self._lock:
+            return time.time() - self._last_change_at
 
     def __len__(self) -> int:
         with self._lock:

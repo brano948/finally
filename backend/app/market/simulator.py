@@ -59,6 +59,7 @@ class GBMSimulator:
         # Per-ticker state
         self._tickers: list[str] = []
         self._prices: dict[str, float] = {}
+        self._seeds: dict[str, float] = {}  # starting price = daily-change baseline
         self._params: dict[str, dict[str, float]] = {}
 
         # Cholesky decomposition of the correlation matrix (for correlated moves)
@@ -130,12 +131,17 @@ class GBMSimulator:
             return
         self._tickers.remove(ticker)
         del self._prices[ticker]
+        del self._seeds[ticker]
         del self._params[ticker]
         self._rebuild_cholesky()
 
     def get_price(self, ticker: str) -> float | None:
         """Current price for a ticker, or None if not tracked."""
         return self._prices.get(ticker)
+
+    def get_seed(self, ticker: str) -> float | None:
+        """Starting price for a ticker; the baseline for daily change %."""
+        return self._seeds.get(ticker)
 
     def get_tickers(self) -> list[str]:
         """Return the list of currently tracked tickers."""
@@ -147,8 +153,12 @@ class GBMSimulator:
         """Add a ticker without rebuilding Cholesky (for batch initialization)."""
         if ticker in self._prices:
             return
+        seed = SEED_PRICES.get(ticker)
+        if seed is None:
+            seed = round(random.uniform(50.0, 300.0), 2)
         self._tickers.append(ticker)
-        self._prices[ticker] = SEED_PRICES.get(ticker, random.uniform(50.0, 300.0))
+        self._prices[ticker] = seed
+        self._seeds[ticker] = seed
         self._params[ticker] = TICKER_PARAMS.get(ticker, dict(DEFAULT_PARAMS))
 
     def _rebuild_cholesky(self) -> None:
@@ -201,7 +211,11 @@ class SimulatorDataSource(MarketDataSource):
     """MarketDataSource backed by the GBM simulator.
 
     Runs a background asyncio task that calls GBMSimulator.step() every
-    `update_interval` seconds and writes results to the PriceCache.
+    `update_interval` seconds and writes results to the PriceCache. Each
+    ticker's seed price is its baseline for daily change %.
+
+    The simulator accepts any well-formed ticker: unknown tickers get a random
+    seed price (50-300) and default drift/volatility.
     """
 
     def __init__(
@@ -213,21 +227,16 @@ class SimulatorDataSource(MarketDataSource):
         self._cache = price_cache
         self._interval = update_interval
         self._event_prob = event_probability
-        self._sim: GBMSimulator | None = None
+        # Built empty and filled in start(); add_ticker before start() also works.
+        self._sim = GBMSimulator(tickers=[], event_probability=event_probability)
         self._task: asyncio.Task | None = None
 
     async def start(self, tickers: list[str]) -> None:
-        self._sim = GBMSimulator(
-            tickers=tickers,
-            event_probability=self._event_prob,
-        )
-        # Seed the cache with initial prices so SSE has data immediately
         for ticker in tickers:
-            price = self._sim.get_price(ticker)
-            if price is not None:
-                self._cache.update(ticker=ticker, price=price)
+            self._sim.add_ticker(ticker)
+            self._seed_cache(ticker)
         self._task = asyncio.create_task(self._run_loop(), name="simulator-loop")
-        logger.info("Simulator started with %d tickers", len(tickers))
+        logger.info("Simulator started with %d tickers", len(self._sim.get_tickers()))
 
     async def stop(self) -> None:
         if self._task and not self._task.done():
@@ -240,31 +249,37 @@ class SimulatorDataSource(MarketDataSource):
         logger.info("Simulator stopped")
 
     async def add_ticker(self, ticker: str) -> None:
-        if self._sim:
-            self._sim.add_ticker(ticker)
-            # Seed cache immediately so the ticker has a price right away
-            price = self._sim.get_price(ticker)
-            if price is not None:
-                self._cache.update(ticker=ticker, price=price)
-            logger.info("Simulator: added ticker %s", ticker)
+        self._sim.add_ticker(ticker)
+        # Seed the cache immediately so the ticker has a price right away
+        self._seed_cache(ticker)
 
     async def remove_ticker(self, ticker: str) -> None:
-        if self._sim:
-            self._sim.remove_ticker(ticker)
+        self._sim.remove_ticker(ticker)
         self._cache.remove(ticker)
-        logger.info("Simulator: removed ticker %s", ticker)
 
     def get_tickers(self) -> list[str]:
-        return self._sim.get_tickers() if self._sim else []
+        return self._sim.get_tickers()
+
+    async def validate_ticker(self, ticker: str) -> bool:
+        """Every well-formed ticker is valid; make sure it has a price."""
+        if ticker not in self._cache:
+            await self.add_ticker(ticker)
+        return True
+
+    def _seed_cache(self, ticker: str) -> None:
+        """Write the current simulated price with the seed price as baseline."""
+        if ticker in self._cache:
+            return
+        price = self._sim.get_price(ticker)
+        if price is not None:
+            self._cache.update(ticker, price, baseline=self._sim.get_seed(ticker))
 
     async def _run_loop(self) -> None:
         """Core loop: step the simulation, write to cache, sleep."""
         while True:
             try:
-                if self._sim:
-                    prices = self._sim.step()
-                    for ticker, price in prices.items():
-                        self._cache.update(ticker=ticker, price=price)
+                for ticker, price in self._sim.step().items():
+                    self._cache.update(ticker, price)  # baseline kept from seed
             except Exception:
                 logger.exception("Simulator step failed")
             await asyncio.sleep(self._interval)

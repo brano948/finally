@@ -1,6 +1,11 @@
 """Tests for GBMSimulator."""
 
-from app.market.seed_prices import SEED_PRICES
+import math
+
+import numpy as np
+import pytest
+
+from app.market.seed_prices import DEFAULT_PARAMS, SEED_PRICES
 from app.market.simulator import GBMSimulator
 
 
@@ -126,6 +131,119 @@ class TestGBMSimulator:
         result = sim.step()
         price_str = str(result["AAPL"])
         # Check that we have at most 2 decimal places
-        if '.' in price_str:
-            decimal_part = price_str.split('.')[1]
+        if "." in price_str:
+            decimal_part = price_str.split(".")[1]
             assert len(decimal_part) <= 2
+
+
+class TestGBMSeedsAndMath:
+    """Seed tracking and statistical checks on the GBM math."""
+
+    def test_get_seed_known_ticker(self):
+        sim = GBMSimulator(tickers=["AAPL"])
+        assert sim.get_seed("AAPL") == SEED_PRICES["AAPL"]
+
+    def test_seed_unchanged_after_steps(self):
+        sim = GBMSimulator(tickers=["AAPL"])
+        for _ in range(100):
+            sim.step()
+        assert sim.get_seed("AAPL") == SEED_PRICES["AAPL"]
+
+    def test_get_seed_unknown_ticker_matches_initial_price(self):
+        sim = GBMSimulator(tickers=["ZZZZ"])
+        seed = sim.get_seed("ZZZZ")
+        assert seed == sim.get_price("ZZZZ")
+        assert 50.0 <= seed <= 300.0
+        assert seed == round(seed, 2)
+
+    def test_get_seed_none_for_untracked(self):
+        assert GBMSimulator(tickers=["AAPL"]).get_seed("NOPE") is None
+
+    def test_remove_ticker_clears_seed(self):
+        sim = GBMSimulator(tickers=["AAPL", "GOOGL"])
+        sim.remove_ticker("AAPL")
+        assert sim.get_seed("AAPL") is None
+        assert sim.get_tickers() == ["GOOGL"]
+
+    def test_unknown_ticker_gets_default_params(self):
+        sim = GBMSimulator(tickers=["ZZZZ"])
+        assert sim._params["ZZZZ"] == DEFAULT_PARAMS
+
+    def test_unknown_ticker_params_are_independent_copies(self):
+        sim = GBMSimulator(tickers=["ZZZZ", "YYYY"])
+        sim._params["ZZZZ"]["sigma"] = 9.9
+        assert sim._params["YYYY"] == DEFAULT_PARAMS
+
+    def test_unknown_ticker_correlation_is_cross_group(self):
+        assert GBMSimulator._pairwise_correlation("ZZZZ", "AAPL") == 0.3
+
+    def test_zero_volatility_is_pure_drift(self):
+        """With sigma=0 and no events, S(t+dt) = S(t) * exp(mu * dt) exactly."""
+        sim = GBMSimulator(tickers=["AAPL"], dt=0.01, event_probability=0.0)
+        sim._params["AAPL"] = {"sigma": 0.0, "mu": 0.1}
+        sim.step()
+        expected = SEED_PRICES["AAPL"] * math.exp(0.1 * 0.01)
+        assert math.isclose(sim.get_price("AAPL"), expected, rel_tol=1e-12)
+
+    def test_log_return_volatility_matches_sigma(self):
+        """Std of one-step log returns is sigma * sqrt(dt)."""
+        np.random.seed(42)
+        dt = 1e-4
+        sim = GBMSimulator(tickers=["AAPL"], dt=dt, event_probability=0.0)
+        sigma = sim._params["AAPL"]["sigma"]
+        prev = sim.get_price("AAPL")
+        returns = []
+        for _ in range(20_000):
+            sim.step()
+            cur = sim.get_price("AAPL")
+            returns.append(math.log(cur / prev))
+            prev = cur
+        assert float(np.std(returns)) == pytest.approx(sigma * math.sqrt(dt), rel=0.05)
+
+    def test_tech_stocks_are_correlated(self):
+        """Sample correlation of AAPL/GOOGL log returns is about 0.6."""
+        np.random.seed(7)
+        sim = GBMSimulator(tickers=["AAPL", "GOOGL"], dt=1e-4, event_probability=0.0)
+        prev = {t: sim.get_price(t) for t in ("AAPL", "GOOGL")}
+        rets: dict[str, list[float]] = {"AAPL": [], "GOOGL": []}
+        for _ in range(10_000):
+            sim.step()
+            for t in rets:
+                cur = sim.get_price(t)
+                rets[t].append(math.log(cur / prev[t]))
+                prev[t] = cur
+        corr = float(np.corrcoef(rets["AAPL"], rets["GOOGL"])[0, 1])
+        assert corr == pytest.approx(0.6, abs=0.05)
+
+    def test_cholesky_valid_for_default_watchlist(self):
+        """The full default correlation matrix is positive definite and unit-diagonal."""
+        sim = GBMSimulator(tickers=list(SEED_PRICES))
+        assert sim._cholesky is not None
+        corr = sim._cholesky @ sim._cholesky.T
+        assert np.allclose(np.diag(corr), 1.0)
+        i, j = sim.get_tickers().index("AAPL"), sim.get_tickers().index("GOOGL")
+        assert corr[i, j] == pytest.approx(0.6)
+
+    def test_cholesky_rebuilds_on_remove(self):
+        sim = GBMSimulator(tickers=["AAPL", "GOOGL", "MSFT"])
+        assert sim._cholesky.shape == (3, 3)
+        sim.remove_ticker("MSFT")
+        assert sim._cholesky.shape == (2, 2)
+        sim.remove_ticker("GOOGL")
+        assert sim._cholesky is None
+
+    def test_event_probability_one_always_shocks(self):
+        """With event_probability=1 every tick moves roughly 2-5%."""
+        sim = GBMSimulator(tickers=["AAPL"], event_probability=1.0)
+        before = sim.get_price("AAPL")
+        sim.step()
+        move = abs(sim.get_price("AAPL") / before - 1)
+        assert 0.019 <= move <= 0.051
+
+    def test_event_probability_zero_has_tiny_moves(self):
+        """Default dt gives sub-percent moves per tick when there are no events."""
+        sim = GBMSimulator(tickers=["AAPL"], event_probability=0.0)
+        for _ in range(100):
+            before = sim.get_price("AAPL")
+            sim.step()
+            assert abs(sim.get_price("AAPL") / before - 1) < 0.01
