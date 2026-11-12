@@ -134,7 +134,7 @@ class TestPublicApi:
             source = create_market_data_source(cache)
 
         assert isinstance(source, MassiveDataSource)
-        assert source._api_key == "test-key-123"
+        assert source._client.API_KEY == "test-key-123"
 
     def test_simulator_receives_cache(self):
         """Test that simulator receives the cache reference."""

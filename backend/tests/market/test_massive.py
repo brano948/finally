@@ -33,7 +33,9 @@ def snap(ticker, price=None, prev=None, trade_ns=TRADE_NS, minute=None, day=None
 
 
 def make_source(cache=None, poll_interval=60.0):
-    return MassiveDataSource(api_key="test-key", price_cache=cache or PriceCache(),
+    # PriceCache defines __len__, so an empty cache is falsy: test against None.
+    cache = PriceCache() if cache is None else cache
+    return MassiveDataSource(api_key="test-key", price_cache=cache,
                              poll_interval=poll_interval)
 
 
