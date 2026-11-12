@@ -7,12 +7,16 @@ import logging
 from dataclasses import dataclass
 
 from massive import RESTClient
+from massive.exceptions import BadResponse
 from massive.rest.models import SnapshotMarketType, TickerSnapshot
 
 from .cache import PriceCache
 from .interface import MarketDataSource
 
 logger = logging.getLogger(__name__)
+
+NOT_FOUND = "NOT_FOUND"  # status in the body of a Massive 404
+NOT_AUTHORIZED = "NOT_AUTHORIZED"  # status in the body of a Massive 403
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +36,7 @@ def parse_snapshot(snap: TickerSnapshot) -> Quote | None:
       1. last_trade.price, time from last_trade.sip_timestamp (nanoseconds)
       2. min.close, time from min.timestamp (milliseconds)
       3. day.close, time = now
+      4. prev_day.close, time = now (before the open, when the day bar is empty)
 
     last_trade and min are None when the plan lacks trade access or before the
     open, hence the fallbacks. The baseline is prev_day.close.
@@ -52,6 +57,9 @@ def parse_snapshot(snap: TickerSnapshot) -> Quote | None:
     day = getattr(snap, "day", None)
     if day and day.close:
         return Quote(snap.ticker, day.close, None, baseline)
+
+    if baseline:
+        return Quote(snap.ticker, baseline, None, baseline)
 
     return None
 
@@ -81,15 +89,21 @@ class MassiveDataSource(MarketDataSource):
         self._tickers: list[str] = []
         self._task: asyncio.Task | None = None
         self._failing = False
+        self._validate_lock = asyncio.Lock()
 
     @property
     def is_live_market(self) -> bool:
         return True
 
     async def start(self, tickers: list[str]) -> None:
+        """Poll once, then keep polling. No-op if already started.
+
+        If the first poll fails the app still starts with an empty cache;
+        prices appear on the next successful poll.
+        """
+        if self._task is not None:
+            return
         self._tickers = list(dict.fromkeys(tickers))
-        # Immediate first poll so the cache has data right away. A failure here
-        # is logged and the app still starts; prices appear on the next good poll.
         await self._poll_once()
         self._task = asyncio.create_task(self._poll_loop(), name="massive-poller")
         logger.info(
@@ -123,25 +137,33 @@ class MassiveDataSource(MarketDataSource):
     async def validate_ticker(self, ticker: str) -> bool:
         """True if the ticker has a quote; one single-ticker snapshot call if not cached.
 
+        Returns False only when Massive says the ticker does not exist or has no
+        price. Any other failure (rate limit, bad key, plan, network) is raised,
+        so the caller does not report it as an unknown ticker.
+
         A valid ticker is written to the cache and tracked, so it can be traded
-        straight away instead of waiting up to one poll interval.
+        straight away instead of waiting up to one poll interval. Calls are
+        serialised so concurrent requests for one ticker cost a single API call.
         """
-        if ticker in self._cache:
+        async with self._validate_lock:
+            if ticker in self._cache:
+                return True
+            try:
+                snap = await asyncio.to_thread(
+                    self._client.get_snapshot_ticker, SnapshotMarketType.STOCKS, ticker
+                )
+            except BadResponse as e:
+                if NOT_FOUND in str(e):
+                    logger.info("Massive: ticker %s not found", ticker)
+                    return False
+                raise
+            quote = parse_snapshot(snap) if snap is not None else None
+            if quote is None:
+                logger.info("Massive: ticker %s has no price data", ticker)
+                return False
+            await self.add_ticker(ticker)
+            self._write(ticker, quote)
             return True
-        try:
-            snap = await asyncio.to_thread(
-                self._client.get_snapshot_ticker, SnapshotMarketType.STOCKS, ticker
-            )
-        except Exception as e:  # unknown tickers raise (404 NOT_FOUND)
-            logger.info("Massive: ticker %s rejected: %s", ticker, e)
-            return False
-        quote = parse_snapshot(snap) if snap is not None else None
-        if quote is None:
-            logger.info("Massive: ticker %s has no price data", ticker)
-            return False
-        await self.add_ticker(ticker)
-        self._write(ticker, quote)
-        return True
 
     # --- Internal ---
 
@@ -188,6 +210,12 @@ class MassiveDataSource(MarketDataSource):
         """Log the first failure at error level, repeats at debug."""
         if self._failing:
             logger.debug("Massive poll still failing: %s", e)
+        elif NOT_AUTHORIZED in str(e):
+            logger.error(
+                "Massive poll refused: your plan does not include the snapshot "
+                "endpoint (free plans do not). Use a paid plan or unset MASSIVE_API_KEY: %s",
+                e,
+            )
         else:
             logger.error("Massive poll failed: %s", e)
         self._failing = True

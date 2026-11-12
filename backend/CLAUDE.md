@@ -29,7 +29,7 @@ from app.market import PriceCache, PriceUpdate, MarketDataSource, create_market_
   - `seconds_since_change()` — seconds since any price last changed value (drives "market closed")
 
 - **`MarketDataSource`** — Abstract interface implemented by `SimulatorDataSource` and `MassiveDataSource`. Lifecycle: `start(tickers)` -> `validate_ticker()` / `add_ticker()` / `remove_ticker()` -> `stop()`.
-  - `validate_ticker(ticker) -> bool`: on `True` the ticker is tracked and priced in the cache. Simulator: always `True`. Massive: one single-ticker snapshot call if not cached; `False` -> `unknown_ticker` (404).
+  - `validate_ticker(ticker) -> bool`: on `True` the ticker is tracked and priced in the cache. Simulator: always `True`. Massive: one single-ticker snapshot call if not cached; `False` -> `unknown_ticker` (404); other Massive errors (429, 401, 403, network) raise `massive.exceptions.BadResponse` and must map to 502/503, not 404.
   - `is_live_market`: `True` only for Massive (prices can go stale).
   - Tickers must already be normalised (uppercased, trimmed, validated) at the API boundary.
 
@@ -64,5 +64,5 @@ uv run --extra dev ruff check app/ tests/ # Lint
 ## Demo
 
 ```bash
-uv run market_data_demo.py   # Live terminal dashboard with simulated prices
+uv run --extra dev market_data_demo.py   # Live terminal dashboard (rich is a dev dependency)
 ```

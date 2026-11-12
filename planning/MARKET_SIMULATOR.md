@@ -186,7 +186,7 @@ cache.get_price("AAPL")                              # float
 await source.stop()
 ```
 
-A demo dashboard is in `backend/market_data_demo.py` (`uv run market_data_demo.py`).
+A demo dashboard is in `backend/market_data_demo.py` (`uv run --extra dev market_data_demo.py`).
 
 ## Testing approach
 

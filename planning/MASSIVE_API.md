@@ -97,7 +97,7 @@ Model field names differ from the JSON keys:
 | `day.c` | `day.close` |
 | `todaysChangePerc` | `todays_change_percent` |
 
-`LastTrade` has **no** `.timestamp` attribute. Use `sip_timestamp` (ns). See "Known issue in current code" in MARKET_INTERFACE.md.
+`LastTrade` has **no** `.timestamp` attribute. Use `sip_timestamp` (ns). See "Resolved gaps" in MARKET_INTERFACE.md.
 
 ## 2. Single ticker snapshot
 

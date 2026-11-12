@@ -11,7 +11,7 @@ from .models import PriceUpdate
 class PriceCache:
     """Latest PriceUpdate per ticker.
 
-    Writers: the active MarketDataSource (simulator loop or Massive poll thread).
+    Writers: the active MarketDataSource (simulator loop or Massive poller; both write on the event loop).
     Readers: SSE, portfolio valuation, trade execution, watchlist.
     """
 

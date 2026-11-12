@@ -57,7 +57,7 @@ uv run --extra dev ruff check app/ tests/
 
 ```bash
 cd backend
-uv run market_data_demo.py
+uv run --extra dev market_data_demo.py
 ```
 
 Rich terminal dashboard with all 10 tickers, sparklines, direction arrows and an event log. Runs 60 seconds or until Ctrl+C.

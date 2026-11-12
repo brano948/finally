@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Request
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 STALE_AFTER_SECONDS = 60.0
 RETRY_MS = 1000
+KEEPALIVE_SECONDS = 15.0
+KEEPALIVE = ": keepalive\n\n"
 
 
 def create_stream_router(
@@ -67,19 +70,31 @@ async def generate_events(
     source: MarketDataSource,
     request: Request,
     interval: float = 0.5,
+    keepalive: float = KEEPALIVE_SECONDS,
 ) -> AsyncGenerator[str, None]:
-    """Yield an event whenever the cache version changes; stop on disconnect."""
+    """Yield an event when the cache version or market_closed flag changes.
+
+    A comment line is sent after `keepalive` seconds of silence so proxies and
+    browsers do not drop an idle connection. Stops on client disconnect.
+    """
     yield f"retry: {RETRY_MS}\n\n"
 
     last_version = -1
+    last_closed = None
+    last_sent = time.monotonic()
     client = request.client.host if getattr(request, "client", None) else "unknown"
     logger.info("SSE client connected: %s", client)
     try:
         while not await request.is_disconnected():
             version = cache.version
-            if version != last_version:
-                last_version = version
+            closed = is_market_closed(cache, source)
+            if version != last_version or closed != last_closed:
+                last_version, last_closed = version, closed
+                last_sent = time.monotonic()
                 yield build_payload(cache, source)
+            elif time.monotonic() - last_sent >= keepalive:
+                last_sent = time.monotonic()
+                yield KEEPALIVE
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         logger.info("SSE stream cancelled: %s", client)

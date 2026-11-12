@@ -9,6 +9,7 @@ import asyncio
 import logging
 
 import pytest
+from massive.exceptions import BadResponse
 from massive.rest.models import SnapshotMarketType, TickerSnapshot
 
 from app.market.cache import PriceCache
@@ -85,7 +86,10 @@ class TestParseSnapshot:
 
     def test_no_price_returns_none(self):
         assert parse_snapshot(snap("A")) is None
-        assert parse_snapshot(snap("A", prev=10.0)) is None
+
+    def test_falls_back_to_prev_close_before_open(self):
+        q = parse_snapshot(snap("A", prev=10.0))
+        assert q == Quote(ticker="A", price=10.0, timestamp=None, baseline=10.0)
 
     def test_zero_prices_are_ignored(self):
         assert parse_snapshot(snap("A", price=0.0, day=0.0)) is None
@@ -345,7 +349,7 @@ class TestTickers:
         source = make_source(cache)
 
         def not_found(*a, **kw):
-            raise Exception("NOT_FOUND")
+            raise BadResponse('{"status":"NOT_FOUND","message":"Ticker not found."}')
 
         monkeypatch.setattr(source._client, "get_snapshot_ticker", not_found)
         assert await source.validate_ticker("ZZZZZ") is False
@@ -360,3 +364,48 @@ class TestTickers:
         assert await source.validate_ticker("ZZZ") is False
         assert "ZZZ" not in cache
         assert source.get_tickers() == []
+
+    @pytest.mark.parametrize("body", ["NOT_AUTHORIZED", "Too Many Requests", "Unauthorized"])
+    async def test_validate_other_errors_are_raised(self, monkeypatch, body):
+        source = make_source()
+
+        def fail(*a, **kw):
+            raise BadResponse(body)
+
+        monkeypatch.setattr(source._client, "get_snapshot_ticker", fail)
+        with pytest.raises(BadResponse):
+            await source.validate_ticker("AAPL")
+
+    async def test_concurrent_validate_makes_one_call(self, monkeypatch):
+        source = make_source()
+        calls = []
+
+        def fake(market, ticker):
+            calls.append(ticker)
+            return snap(ticker, 70.0, prev=69.0)
+
+        monkeypatch.setattr(source._client, "get_snapshot_ticker", fake)
+        results = await asyncio.gather(*(source.validate_ticker("PYPL") for _ in range(3)))
+        assert results == [True, True, True]
+        assert calls == ["PYPL"]
+
+    async def test_start_twice_starts_one_poller(self, monkeypatch):
+        source = make_source()
+        monkeypatch.setattr(source._client, "get_snapshot_all", lambda **kw: [])
+        await source.start(["AAPL"])
+        task = source._task
+        await source.start(["AAPL"])
+        assert source._task is task
+        await source.stop()
+
+    async def test_plan_refusal_logs_clear_message(self, monkeypatch, caplog):
+        source = make_source()
+        source._tickers = ["AAPL"]
+
+        def refused(**kw):
+            raise BadResponse('{"status":"NOT_AUTHORIZED"}')
+
+        monkeypatch.setattr(source._client, "get_snapshot_all", refused)
+        with caplog.at_level(logging.ERROR, logger="app.market.massive_client"):
+            await source._poll_once()
+        assert "does not include the snapshot" in caplog.text

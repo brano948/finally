@@ -195,7 +195,7 @@ class GBMSimulator:
         tech = CORRELATION_GROUPS["tech"]
         finance = CORRELATION_GROUPS["finance"]
 
-        # TSLA is in tech set but behaves independently
+        # TSLA is not in a group and behaves independently
         if t1 == "TSLA" or t2 == "TSLA":
             return TSLA_CORR
 
@@ -226,7 +226,6 @@ class SimulatorDataSource(MarketDataSource):
     ) -> None:
         self._cache = price_cache
         self._interval = update_interval
-        self._event_prob = event_probability
         # Built empty and filled in start(); add_ticker before start() also works.
         self._sim = GBMSimulator(tickers=[], event_probability=event_probability)
         self._task: asyncio.Task | None = None

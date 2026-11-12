@@ -67,7 +67,7 @@ class MarketDataSource(ABC):
     def is_live_market(self) -> bool                      # False (simulator), True (Massive)
 ```
 
-`validate_ticker`: the simulator accepts any ticker (adds it with a random seed if new). Massive returns `True` immediately for a cached ticker, otherwise makes one `get_snapshot_ticker` call; an exception or a snapshot with no price returns `False` (the API maps this to 404 `unknown_ticker`).
+`validate_ticker`: the simulator accepts any ticker (adds it with a random seed if new). Massive returns `True` immediately for a cached ticker, otherwise makes one `get_snapshot_ticker` call; a `NOT_FOUND` response or a snapshot with no price returns `False` (the API maps this to 404 `unknown_ticker`). Any other failure (rate limit, bad key, plan, network) is raised so the API can answer 502/503 instead of 404. Concurrent calls are serialised, so one uncached ticker costs one API call.
 
 ### Factory
 
@@ -104,7 +104,7 @@ await sync_tracking(db, request.app.state.source)                 # after every 
 
 ## SSE payload
 
-One event per change of `cache.version`, polled every 0.5s, preceded by a `retry: 1000` directive. An event is always sent on connect, even when the cache is empty:
+One event per change of `cache.version` or of `market_closed`, checked every 0.5s, preceded by a `retry: 1000` directive. After 15s without an event a `: keepalive` comment line is sent. With Massive, events follow the poll interval, not 500ms. An event is always sent on connect, even when the cache is empty:
 
 ```
 data: {"prices": {"AAPL": {"ticker": "AAPL", "price": 190.5, "previous_price": 190.4,

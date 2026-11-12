@@ -25,7 +25,7 @@ class MarketDataSource(ABC):
 
     @abstractmethod
     async def start(self, tickers: list[str]) -> None:
-        """Start the background task. Call once. First prices are cached on return."""
+        """Start the background task. Call once. Simulator caches prices on return; Massive tries one poll first."""
 
     @abstractmethod
     async def stop(self) -> None:

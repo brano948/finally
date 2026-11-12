@@ -9,6 +9,7 @@ from app.market.cache import PriceCache
 from app.market.massive_client import MassiveDataSource
 from app.market.simulator import SimulatorDataSource
 from app.market.stream import (
+    KEEPALIVE,
     STALE_AFTER_SECONDS,
     build_payload,
     create_stream_router,
@@ -159,3 +160,31 @@ class TestRouter:
         assert response.media_type == "text/event-stream"
         assert response.headers["cache-control"] == "no-cache"
         assert response.headers["x-accel-buffering"] == "no"
+
+
+@pytest.mark.asyncio
+class TestKeepaliveAndClosedFlag:
+    async def test_keepalive_sent_when_idle(self):
+        cache = PriceCache()
+        cache.update("AAPL", 190.0)
+        events = [e async for e in generate_events(
+            cache, SimulatorDataSource(cache), FakeRequest(6), 0.01, keepalive=0.02)]
+        assert KEEPALIVE in events
+
+    async def test_no_keepalive_when_busy(self):
+        cache = PriceCache()
+        cache.update("AAPL", 190.0)
+        events = [e async for e in generate_events(
+            cache, SimulatorDataSource(cache), FakeRequest(3), 0.001, keepalive=60)]
+        assert KEEPALIVE not in events
+
+    async def test_event_sent_when_market_closed_flips(self, monkeypatch):
+        cache = PriceCache()
+        cache.update("AAPL", 190.0)
+        age = {"s": 0.0}
+        monkeypatch.setattr(cache, "seconds_since_change", lambda: age["s"])
+        gen = generate_events(cache, MassiveDataSource("k", cache), FakeRequest(4), 0.001)
+        await anext(gen)  # retry
+        assert parse(await anext(gen))["market_closed"] is False
+        age["s"] = STALE_AFTER_SECONDS + 1  # no cache write, only the age changes
+        assert parse(await anext(gen))["market_closed"] is True

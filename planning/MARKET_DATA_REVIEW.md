@@ -73,3 +73,25 @@ Uncovered lines: `simulator.py:155` (duplicate guard in `_add_ticker_internal`, 
 ## Review scope and limits
 
 I read all of the market-data source and the planning docs `MARKET_DATA_SUMMARY.md`, `MARKET_INTERFACE.md`, `MARKET_SIMULATOR.md`, `MASSIVE_API.md`, `REVIEW.md`, `REVIEW_v1.md` and `PLAN.md`. I did **not** read `MARKET_DATA_DESIGN.md` (1,052 lines), `PLAN_01.bckp`, the `planning/archive/` files, or the test files line by line; test quality is judged from the passing run, 99% coverage, the summary description and file sizes. A second pass over those would be needed for a fully exhaustive review.
+
+## Resolution (2026-11-12)
+
+Fixes applied. `uv run --extra dev pytest`: 188 passed (10 new tests). `ruff check`: clean.
+
+| # | Finding | Status |
+|---|---|---|
+| 1 | Every Massive error reported as unknown ticker | Fixed. `validate_ticker` returns False only for a `NOT_FOUND` body or a snapshot without a price; other `BadResponse` errors are raised. The Massive client exposes no status code, only the body text, so the match is on the body. |
+| 2 | Free-tier key gives an empty app | Mitigated. A `NOT_AUTHORIZED` poll failure now logs a clear message saying the plan lacks snapshots and to use a paid plan or unset the key. The grouped-daily fallback is not built. Confirm with a real free key. |
+| 3 | No live Massive run | Open. No `MASSIVE_API_KEY` in `.env`; needs a manual smoke run with a key. |
+| 4 | SSE keepalive | Fixed. `: keepalive` comment after 15s idle. |
+| 5 | `market_closed` only re-evaluated on version change | Fixed. Checked every loop; an event is sent when it flips. |
+| 6 | Pre-open rejection | Fixed. `parse_snapshot` falls back to `prev_day.close`. |
+| 7 | `start()` price guarantee | Fixed in the ABC docstring. |
+| 8 | `rich` runtime dependency | Moved to the `dev` extra; demo command is now `uv run --extra dev market_data_demo.py`. |
+| 9 | Double start | Fixed for Massive (no-op when started). Simulator still creates a second task if started twice. |
+| 10-13 | Stale comments and doc reference | Fixed. |
+| 14 | Concurrent validate cost | Fixed with a lock. |
+| 12 | Unused `_event_prob` on the data source | Removed. |
+| 15 | Global RNG state | Accepted, no change. |
+
+Remaining before Massive is called supported: findings 2 and 3, both needing a real API key.
